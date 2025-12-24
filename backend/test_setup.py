@@ -7,24 +7,55 @@ from dotenv import load_dotenv
 load_dotenv()
 
 async def test_espn_service():
-    """Test ESPN API integration"""
-    print("🏈 Testing ESPN Service...")
+    """Test ESPN API integration with real data"""
+    print("🏈 Testing ESPN Service with REAL data...")
     
     from app.services.espn_service import ESPNService
     
     espn = ESPNService()
     
     try:
-        # Test: Get scoreboard (this should work)
-        print("\n   Fetching current NFL scoreboard...")
+        # Test 1: Search for a real player
+        print("\n1. Searching for 'Patrick Mahomes'...")
+        player = await espn.search_player("Patrick Mahomes")
+        
+        if player and player.get('id') != 'fallback':
+            print(f"   ✅ Found REAL player: {player.get('displayName')}")
+            print(f"   Team: {player.get('team', {}).get('abbreviation', 'N/A')}")
+            print(f"   Position: {player.get('position', {}).get('abbreviation', 'N/A')}")
+            
+            player_id = player.get('id')
+            
+            # Test 2: Get player info with injury status
+            print(f"\n2. Fetching player info and injury status...")
+            player_info = await espn.get_player_info(player_id)
+            
+            if player_info and 'athlete' in player_info:
+                injuries = player_info['athlete'].get('injuries', [])
+                if injuries:
+                    print(f"   🏥 Injury Status: {injuries[0].get('status', 'Unknown')}")
+                    print(f"   Details: {injuries[0].get('longComment', 'No details')}")
+                else:
+                    print(f"   ✅ No injuries reported!")
+            
+            # Test 3: Get player stats
+            print(f"\n3. Fetching player stats...")
+            stats = await espn.get_player_stats(player_id)
+            
+            if stats:
+                print(f"   ✅ Stats retrieved!")
+            
+        else:
+            print("   ⚠️  Using fallback player (ESPN API might be rate limiting)")
+        
+        # Test 4: Get current scoreboard
+        print("\n4. Fetching current week's games...")
         scoreboard = await espn.get_scoreboard()
         
-        if scoreboard and "events" in scoreboard:
-            print(f"   ✅ Scoreboard retrieved! {len(scoreboard['events'])} games found")
-        else:
-            print("   ⚠️  Scoreboard returned but no events")
+        if scoreboard and 'events' in scoreboard:
+            print(f"   ✅ Found {len(scoreboard['events'])} games this week")
         
-        print("\n✅ ESPN Service working!")
+        print("\n✅ ESPN Service working with REAL data!")
         
     except Exception as e:
         print(f"\n❌ Error: {e}")

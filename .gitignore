@@ -28,3 +28,11 @@ Thumbs.db
 
 # Test files
 check_models.py
+
+# Frontend
+frontend/node_modules/
+frontend/build/
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local

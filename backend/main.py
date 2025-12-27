@@ -1,11 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import router as player_router
 from dotenv import load_dotenv
 import uvicorn
 
-# Load environment variables
+# Load environment variables FIRST (before importing routes!)
 load_dotenv()
+
+# NOW import routes (after env vars are loaded)
+from app.api.routes import router as player_router
 
 app = FastAPI(
     title="Fantasy Football AI Assistant",

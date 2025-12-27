@@ -1,177 +1,120 @@
-from dotenv import load_dotenv
-import os
-load_dotenv()
-
 from fastapi import APIRouter, HTTPException
-from app.models.schemas import (
-    PlayerAnalysisRequest,
-    PlayerAnalysisResponse,
-    PlayerSearchResponse,
-    ComparePlayersRequest,
-    ComparePlayersResponse
-)
-from app.services.espn_service import ESPNService
+from app.services.hybrid_service import HybridNFLService
 from app.services.gemini_service import GeminiService
-from typing import List
 
-router = APIRouter(prefix="/api/players", tags=["players"])
+router = APIRouter()
 
 # Initialize services
-espn_service = ESPNService()
+hybrid_service = HybridNFLService()
 gemini_service = GeminiService()
 
-@router.post("/analyze", response_model=PlayerAnalysisResponse)
-async def analyze_player(request: PlayerAnalysisRequest):
-    """
-    Analyze a player for fantasy football decisions using AI
-    
-    This endpoint:
-    1. Searches for the player in ESPN's database
-    2. Fetches their recent stats and info
-    3. Uses Claude AI to provide start/sit recommendations
-    """
-    
+@router.post("/api/players/analyze")
+async def analyze_player(request: dict):
+    """Analyze a player and provide START/SIT recommendation"""
     try:
-        # Step 1: Search for the player
-        player_data = await espn_service.search_player(request.player_name)
+        print(f"📥 Received request: {request}")
+        
+        # Accept both snake_case and camelCase
+        player_name = request.get("playerName") or request.get("player_name")
+        
+        if not player_name:
+            print(f"❌ Missing player name in request: {request}")
+            raise HTTPException(status_code=400, detail="Player name is required")
+        
+        print(f"\n{'='*60}")
+        print(f"Analyzing player: {player_name}")
+        print(f"{'='*60}")
+        
+        # Step 1: Get complete player data from hybrid service
+        player_data = await hybrid_service.get_complete_player_data(player_name)
         
         if not player_data:
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Player '{request.player_name}' not found"
-            )
+            raise HTTPException(status_code=404, detail=f"Player '{player_name}' not found")
         
-        player_id = player_data.get("id")
-        player_name = player_data.get("displayName", request.player_name)
-        position = player_data.get("position", {}).get("abbreviation", "N/A")
-        team = player_data.get("team", {}).get("abbreviation", "N/A")
+        # Step 2: Get player stats
+        stats = await hybrid_service.get_player_stats(player_data)
+        stats_summary = stats.get("summary", "No stats available") if stats else "No stats available"
         
-        # Step 2: Get player stats if requested
-        stats_data = None
-        if request.include_stats:
-            stats_data = await espn_service.get_player_stats(player_id)
+        # Step 3: Get injury status
+        injury_status = await hybrid_service.get_player_injury(player_data)
         
-        # Step 3: Get detailed player info (injury status, etc.)
-        player_info = await espn_service.get_player_info(player_id)
+        # Step 4: Get team context (depth chart + injured teammates)
+        team_context = await hybrid_service.get_team_context(player_data)
         
-        injury_status = "Healthy"
-        if player_info and "athlete" in player_info:
-            injuries = player_info["athlete"].get("injuries", [])
-            if injuries:
-                injury_status = injuries[0].get("status", "Injured")
+        # Step 5: Prepare data for Gemini AI
+        analysis_data = {
+            "name": player_data.get("name"),
+            "position": player_data.get("position"),
+            "team": player_data.get("team"),
+            "stats_summary": stats_summary,
+            "injury_status": injury_status,
+            "team_context": team_context.get("context", ""),
+            "injured_teammates": team_context.get("injured_teammates", [])
+        }
         
-        # Step 4: Get matchup data if requested
-        matchup_data = None
-        if request.include_matchup and team != "N/A":
-            team_id = player_data.get("team", {}).get("id")
-            if team_id:
-                matchup_data = await espn_service.get_team_schedule(team_id)
+        # Step 6: Get AI analysis
+        ai_analysis = await gemini_service.analyze_player(analysis_data)
         
-        # Step 5: Analyze with Claude AI
-        analysis = await gemini_service.analyze_player(
-            player_data=player_data,
-            stats_data=stats_data,
-            matchup_data=matchup_data
-        )
+        print(f"\n{'='*60}")
+        print(f"Analysis complete!")
+        print(f"{'='*60}\n")
         
-        # Step 6: Build response
-        response = PlayerAnalysisResponse(
-            player_name=player_name,
-            team=team,
-            position=position,
-            injury_status=injury_status,
-            recommendation=analysis.get("recommendation", "UNKNOWN"),
-            confidence=analysis.get("confidence", "LOW"),
-            key_factors=analysis.get("key_factors", []),
-            risks=analysis.get("risks", "N/A"),
-            upside=analysis.get("upside", "N/A"),
-            projected_points=analysis.get("projected_points", 0.0),
-            summary=analysis.get("summary", "No summary available"),
-            raw_stats=stats_data if request.include_stats else None
-        )
-        
-        return response
+        # Format response to match frontend expectations
+        return {
+            "player_name": player_data.get("name"),
+            "position": player_data.get("position"),
+            "team": player_data.get("team"),
+            "injury_status": injury_status,
+            "recommendation": ai_analysis.get("recommendation", "UNCERTAIN"),
+            "confidence": "HIGH" if ai_analysis.get("confidence", 0) >= 80 else "MEDIUM" if ai_analysis.get("confidence", 0) >= 50 else "LOW",
+            "projected_points": ai_analysis.get("projected_points", 0),
+            "summary": ai_analysis.get("reasoning", "No analysis available"),
+            "key_factors": [
+                stats_summary,
+                f"Injury Status: {injury_status}",
+                team_context.get("context", ""),
+            ],
+            "upside": "Strong performance potential based on current stats and team situation.",
+            "risks": f"Injury concerns: {injury_status}" if injury_status != "Healthy" else "Monitor weekly matchup and game script."
+        }
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error in analyze_player: {e}")
+        print(f"❌ Error in analyze_player: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/search/{player_name}", response_model=List[PlayerSearchResponse])
-async def search_player(player_name: str):
-    """
-    Search for players by name
-    """
-    
+@router.post("/api/players/search")
+async def search_player(request: dict):
+    """Search for a player by name"""
     try:
-        player_data = await espn_service.search_player(player_name)
+        # Accept both snake_case and camelCase
+        player_name = request.get("playerName") or request.get("player_name")
+        
+        if not player_name:
+            raise HTTPException(status_code=400, detail="Player name is required")
+        
+        # Get player data
+        player_data = await hybrid_service.get_complete_player_data(player_name)
         
         if not player_data:
-            return []
+            raise HTTPException(status_code=404, detail=f"Player '{player_name}' not found")
         
-        # Return as a list (could be extended to return multiple matches)
-        return [PlayerSearchResponse(
-            id=player_data.get("id", ""),
-            name=player_data.get("displayName", player_name),
-            team=player_data.get("team", {}).get("abbreviation"),
-            position=player_data.get("position", {}).get("abbreviation"),
-            jersey_number=player_data.get("jersey")
-        )]
-        
-    except Exception as e:
-        print(f"Error in search_player: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/compare", response_model=ComparePlayersResponse)
-async def compare_players(request: ComparePlayersRequest):
-    """
-    Compare multiple players to help with start/sit decisions
-    """
-    
-    try:
-        if len(request.player_names) < 2:
-            raise HTTPException(
-                status_code=400,
-                detail="Need at least 2 players to compare"
-            )
-        
-        # Fetch data for all players
-        players_data = []
-        for player_name in request.player_names:
-            player_data = await espn_service.search_player(player_name)
-            if player_data:
-                player_id = player_data.get("id")
-                stats_data = await espn_service.get_player_stats(player_id)
-                
-                players_data.append({
-                    "name": player_data.get("displayName", player_name),
-                    "position": player_data.get("position", {}).get("abbreviation", "N/A"),
-                    "team": player_data.get("team", {}).get("abbreviation", "N/A"),
-                    "stats": stats_data
-                })
-        
-        if not players_data:
-            raise HTTPException(
-                status_code=404,
-                detail="No players found"
-            )
-        
-        # Compare with Claude
-        comparison = await gemini_service.compare_players(players_data)
-        
-        return ComparePlayersResponse(
-            rankings=comparison.get("rankings", []),
-            recommendation=comparison.get("recommendation", "Unable to provide recommendation")
-        )
+        return {
+            "name": player_data.get("name"),
+            "position": player_data.get("position"),
+            "team": player_data.get("team"),
+        }
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error in compare_players: {e}")
+        print(f"❌ Error in search_player: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    await espn_service.close()
+@router.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy"}
